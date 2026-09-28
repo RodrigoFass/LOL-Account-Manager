@@ -1355,10 +1355,12 @@ ipcMain.handle('auth:changePassword', async (_, { oldPwd, newPwd }) => {
 
 // — Accounts —
 ipcMain.handle('accounts:getAll',        ()          => isLoggedIn ? getAccounts() : []);
-ipcMain.handle('accounts:add',           (_, d)      => { try { return { success: true, id: addAccount(d) }; } catch(e) { return { success: false, error: e.message }; } });
-ipcMain.handle('accounts:update',        (_, {id,u}) => { try { updateAccount(id, u); return { success: true }; } catch(e) { return { success: false, error: e.message }; } });
-ipcMain.handle('accounts:delete',        (_, id)     => { try { deleteAccount(id); return { success: true }; } catch(e) { return { success: false, error: e.message }; } });
+const NOT_AUTH = { success: false, error: 'Não autenticado' };
+ipcMain.handle('accounts:add',           (_, d)      => { if (!isLoggedIn) return NOT_AUTH; try { return { success: true, id: addAccount(d) }; } catch(e) { return { success: false, error: e.message }; } });
+ipcMain.handle('accounts:update',        (_, {id,u}) => { if (!isLoggedIn) return NOT_AUTH; try { updateAccount(id, u); return { success: true }; } catch(e) { return { success: false, error: e.message }; } });
+ipcMain.handle('accounts:delete',        (_, id)     => { if (!isLoggedIn) return NOT_AUTH; try { deleteAccount(id); return { success: true }; } catch(e) { return { success: false, error: e.message }; } });
 ipcMain.handle('accounts:reorder', (_, ids) => {
+  if (!isLoggedIn) return NOT_AUTH;
   try {
     const data = readData();
     const map  = {};
