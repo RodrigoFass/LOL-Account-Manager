@@ -1370,10 +1370,20 @@ ipcMain.handle('accounts:update',        (_, {id,u}) => { try { updateAccount(id
 ipcMain.handle('accounts:delete',        (_, id)     => { try { deleteAccount(id); return { success: true }; } catch(e) { return { success: false, error: e.message }; } });
 ipcMain.handle('accounts:reorder', (_, ids) => {
   try {
+    if (!Array.isArray(ids)) return { success: false, error: 'Lista de IDs inválida' };
     const data = readData();
-    const map  = {};
-    data.accounts.forEach(a => { map[a.id] = a; });
-    data.accounts = ids.map(id => map[id]).filter(Boolean);
+    const map  = new Map(data.accounts.map(a => [a.id, a]));
+    const seen = new Set();
+    const ordered = [];
+    for (const id of ids) {
+      if (seen.has(id) || !map.has(id)) continue;  // ignore duplicates / unknown ids
+      seen.add(id);
+      ordered.push(map.get(id));
+    }
+    // Never drop accounts missing from `ids` (stale list, import in progress…) —
+    // keep them at the end in their original order.
+    for (const a of data.accounts) if (!seen.has(a.id)) ordered.push(a);
+    data.accounts = ordered;
     writeData(data);
     return { success: true };
   } catch(e) { return { success: false, error: e.message }; }
