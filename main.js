@@ -938,6 +938,47 @@ async function getApiKey() {
   try { return decrypt(d.apiKey, encryptionKey); } catch { return null; }
 }
 
+/**
+ * Resolves the PUUID of a saved account from its Riot ID.
+ * Primary: continental ACCOUNT-V1 (proper Riot ID — works with production/personal keys).
+ * Fallback: regional SUMMONER-V4 by-name (works with development keys that lack
+ *   continental routing access — returns puuid + summonerId in a single call).
+ * If both are blocked (403), throws an error flagged with `puuidRequired` so the
+ * UI can ask the user to fill the PUUID manually.
+ * @returns {Promise<{puuid: string, summonerId: (string|null), profileIconId: (number|null)}>}
+ */
+async function resolvePuuid(acct, host, region, apiKey) {
+  try {
+    const info = await riotRequest(
+      `https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(acct.nickname)}/${encodeURIComponent(acct.tag)}`,
+      apiKey
+    );
+    return { puuid: info.puuid, summonerId: null, profileIconId: null };
+  } catch (e) {
+    if (e.status !== 403) throw e;   // only swallow 403 (permission denied for dev key)
+  }
+  // Dev-key fallback — summoner name is usually the same as the game name in BR/LATAM
+  try {
+    const s = await riotRequest(
+      `https://${host}/lol/summoner/v4/summoners/by-name/${encodeURIComponent(acct.nickname)}`,
+      apiKey
+    );
+    return { puuid: s.puuid, summonerId: s.id ?? null, profileIconId: s.profileIconId ?? null };
+  } catch (e2) {
+    if (e2.status === 403) {
+      // Both endpoints blocked — this happens with Development Keys.
+      const err = new Error(
+        'PUUID_REQUIRED: Chave de desenvolvimento não tem acesso aos endpoints de busca por nome. ' +
+        'Edite a conta e preencha o campo PUUID (obtenha em developer.riotgames.com → API Explorer).'
+      );
+      err.status = 403;
+      err.puuidRequired = true;
+      throw err;
+    }
+    throw e2;
+  }
+}
+
 async function refreshAccount(id) {
   // ── Phase 1: snapshot for reading current state (puuid / summonerId) ─────
   const snap = readData();
@@ -958,41 +999,10 @@ async function refreshAccount(id) {
   let profileIconId = acct.profileIconId ?? null;
 
   if (!puuid) {
-    // Primary: continental ACCOUNT-V1 (proper Riot ID — works with production/personal keys)
-    // Fallback: regional SUMMONER-V4 by-name (works with development keys that lack
-    //   continental routing access — returns puuid + summonerId in a single call)
-    try {
-      const info = await riotRequest(
-        `https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(acct.nickname)}/${encodeURIComponent(acct.tag)}`,
-        apiKey
-      );
-      puuid = info.puuid;
-    } catch (e) {
-      if (e.status !== 403) throw e;   // only swallow 403 (permission denied for dev key)
-      // Dev-key fallback — summoner name is usually the same as the game name in BR/LATAM
-      try {
-        const s = await riotRequest(
-          `https://${host}/lol/summoner/v4/summoners/by-name/${encodeURIComponent(acct.nickname)}`,
-          apiKey
-        );
-        puuid         = s.puuid;
-        summonerId    = s.id;   // grab summonerId here too — saves one extra round-trip
-        profileIconId = profileIconId ?? s.profileIconId ?? null;
-      } catch (e2) {
-        if (e2.status === 403) {
-          // Both endpoints blocked — this happens with Development Keys.
-          // Signal the frontend that the user must enter the PUUID manually in the edit modal.
-          const err = new Error(
-            'PUUID_REQUIRED: Chave de desenvolvimento não tem acesso aos endpoints de busca por nome. ' +
-            'Edite a conta e preencha o campo PUUID (obtenha em developer.riotgames.com → API Explorer).'
-          );
-          err.status = 403;
-          err.puuidRequired = true;
-          throw err;
-        }
-        throw e2;
-      }
-    }
+    const r = await resolvePuuid(acct, host, region, apiKey);
+    puuid         = r.puuid;
+    summonerId    = r.summonerId ?? summonerId;   // by-name fallback saves one extra round-trip
+    profileIconId = profileIconId ?? r.profileIconId;
   }
 
   // ── Ranked entries — try newest PUUID-based endpoint first, fall back to summonerId ──
@@ -1460,7 +1470,7 @@ ipcMain.handle('riot:lookupPuuid', async (_, { nickname, tag, server }) => {
 ipcMain.handle('ddragon:getVersion', async () => await getDDVersion());
 
 ipcMain.handle('riot:fetchChampions', async (_, id) => {
-  if (!isLoggedIn) return { success: false };
+  if (!isLoggedIn) return { success: false, error: 'Não autenticado' };
   try {
     // Phase 1: snapshot for reading current puuid
     const snap = readData();
@@ -1473,16 +1483,7 @@ ipcMain.handle('riot:fetchChampions', async (_, id) => {
 
     // Phase 2: all API calls — store in local variables, no writes yet
     let puuid = acct.puuid;
-    if (!puuid) {
-      try {
-        const i = await riotRequest(`https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(acct.nickname)}/${encodeURIComponent(acct.tag)}`, apiKey);
-        puuid = i.puuid;
-      } catch (e) {
-        if (e.status !== 403) throw e;
-        const s = await riotRequest(`https://${host}/lol/summoner/v4/summoners/by-name/${encodeURIComponent(acct.nickname)}`, apiKey);
-        puuid = s.puuid;
-      }
-    }
+    if (!puuid) puuid = (await resolvePuuid(acct, host, region, apiKey)).puuid;
     const masteries = await riotRequest(`https://${host}/lol/champion-mastery/v4/champion-masteries/by-puuid/${puuid}`, apiKey);
 
     // Phase 3: atomic write — re-read fresh data before writing
